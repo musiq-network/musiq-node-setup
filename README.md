@@ -63,32 +63,50 @@ Your license and any rewards are unaffected.
 
 ## For hosting partners
 
-Install non-interactively by setting environment variables:
-
-| Variable | Purpose |
-|---|---|
-| `MUSIQ_LICENSE_KEY` | The member's license key (skips the prompt) |
-| `MUSIQ_HOST_API_KEY` | Your host API key — tags the node as hosted by you |
-| `MUSIQ_API_BASE` | API base URL (default `https://musiqnetwork.com`) |
-| `MUSIQ_SCHEDULE` | systemd `OnCalendar` for heartbeats (default every 6 h) |
+Use **`musiq-host.sh`** to run many nodes on one server: one systemd timer checks in
+every node on the machine, each with its own signing key. Nodes are activated by
+**license id** with your host API key, so you never need members' license keys.
 
 ```bash
-sudo MUSIQ_LICENSE_KEY=MSQ-XXXX-XXXX-XXXX MUSIQ_HOST_API_KEY=mnh_... \
+curl -fsSLO https://raw.githubusercontent.com/musiq-network/musiq-node-setup/main/musiq-host.sh
+chmod +x musiq-host.sh
+sudo MUSIQ_HOST_API_KEY=mnh_... ./musiq-host.sh setup        # config + timer (installs /usr/local/bin/musiq-host)
+sudo musiq-host activate <licenseId> [<licenseId> ...]       # add nodes
+sudo musiq-host activate-file ids.txt                        # or one license id per line
+sudo musiq-host status                                       # every node and its last heartbeat
+sudo musiq-host remove <licenseId>                           # stop hosting a node
+```
+
+| Variable (for `setup`) | Purpose |
+|---|---|
+| `MUSIQ_HOST_API_KEY` | Your host API key (`mnh_…`) |
+| `MUSIQ_API_BASE` | API base (default `https://musiqnetwork.com`; dev: `https://dev.musiqnetwork.com`) |
+| `MUSIQ_BYPASS` | Dev only: the access-bypass secret |
+| `MUSIQ_PARALLEL` | Heartbeats sent at once (default 16) |
+| `MUSIQ_SCHEDULE` | systemd `OnCalendar` for heartbeats (default every 6 h) |
+
+Layout: `/opt/musiq-host/host.env` (config, mode 600) and
+`/opt/musiq-host/nodes/<licenseId>/node.key` (one Ed25519 key per node, mode 600).
+**Back up `/opt/musiq-host/nodes`**: a lost key means re-activating that node.
+
+Sizing: each node is a 32-byte key and one signed HTTPS request per run. A run takes
+roughly 0.1–0.3 s per node, so with `MUSIQ_PARALLEL=16` about 10,000 nodes check in
+within a few minutes on a small server (1 vCPU, 512 MB RAM). Nothing syncs a blockchain.
+
+A license whose node is already running elsewhere (another host, or the member's own
+machine) can't be activated by license id (`409 running_elsewhere`); the member moves
+it by activating with their license key.
+
+**One node per machine or container** (e.g. one container per license) works with the
+single-node installer:
+
+```bash
+sudo MUSIQ_LICENSE_ID=<licenseId> MUSIQ_HOST_API_KEY=mnh_... \
   bash <(curl -fsSL https://raw.githubusercontent.com/musiq-network/musiq-node-setup/main/install.sh)
 ```
 
-### Node API (summary)
-
-| Method & path | Auth | Purpose |
-|---|---|---|
-| `POST /api/nodes/v1/activate` | license key (+ optional host key) | `{licenseKey, nodePublicKey, agentVersion}` → `{licenseId, tokenId, memberId}` |
-| `POST /api/nodes/v1/heartbeat` | Ed25519 signature | Body `{licenseId, ts, agentVersion}`; header `X-Signature` = base64 signature of the exact body bytes |
-| `GET /api/nodes/v1/licenses` | `Authorization: Bearer <host key>` | All licenses: owner, on-chain token, node key, last heartbeat (paginated with `cursor`) |
-| `GET /api/nodes/v1/licenses/{licenseId}` | host key | One license plus its last 30 days of heartbeats |
-| `GET /api/nodes/v1/days/{day}` | public | A reward day's heartbeat count and on-chain settlement |
-
-Heartbeats count for the day containing `ts` and are accepted until two days after
-that day ends, so a delayed delivery still counts.
+The full host API (licenses and owners, members, node counts) is documented in the
+MusIQ Network Node Host API guide shared with hosting partners.
 
 ## How rewards work (short version)
 
@@ -104,6 +122,6 @@ investment return. See the MusIQ Node Terms.
 
 ## Security
 
-- `node.key` and `license.key` are readable by root only (`/opt/musiq-agent`, mode 600).
+- `node.key` and `license.key` are readable by root only (`/opt/musiq-agent` or `/opt/musiq-host`, mode 600).
 - The signing key never leaves the server; the network only stores its public half.
 - Heartbeats are signed, so nobody can check in for your license without your key.

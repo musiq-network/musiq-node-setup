@@ -4,7 +4,9 @@
 #   sudo bash <(curl -fsSL https://raw.githubusercontent.com/musiq-network/musiq-node-setup/main/install.sh)
 #
 # Interactive by default. Hosts can install non-interactively with environment
-# variables (see README): MUSIQ_LICENSE_KEY, MUSIQ_HOST_API_KEY, MUSIQ_API_BASE.
+# variables (see README): MUSIQ_LICENSE_KEY, or MUSIQ_LICENSE_ID with
+# MUSIQ_HOST_API_KEY; MUSIQ_API_BASE. Hosts running many nodes per server
+# should use musiq-host.sh instead (one service for every node).
 #
 #   sudo bash install.sh --uninstall     remove the agent (keeps nothing behind)
 set -euo pipefail
@@ -51,16 +53,24 @@ rm -f "$TMPK"
 mkdir -p "$AGENT_DIR"
 chmod 700 "$AGENT_DIR"
 LICENSE_KEY="${MUSIQ_LICENSE_KEY:-}"
-if [ -z "$LICENSE_KEY" ] && [ -f "$AGENT_DIR/license.key" ]; then
+HOST_LICENSE_ID="${MUSIQ_LICENSE_ID:-}"
+if [ -n "$HOST_LICENSE_ID" ]; then
+  # Host install by license id: needs the host API key, never the member's license key.
+  [ -n "${MUSIQ_HOST_API_KEY:-}" ] || error "MUSIQ_LICENSE_ID needs MUSIQ_HOST_API_KEY."
+  [[ "$HOST_LICENSE_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || error "MUSIQ_LICENSE_ID is not a valid license id."
+elif [ -z "$LICENSE_KEY" ] && [ -f "$AGENT_DIR/license.key" ]; then
   EXISTING=$(cat "$AGENT_DIR/license.key")
   read -rp "Existing license ${EXISTING:0:8}… found. Re-use it? [Y/n]: " REUSE
   [[ "${REUSE:-Y}" =~ ^[Yy]$ ]] && LICENSE_KEY="$EXISTING"
 fi
-if [ -z "$LICENSE_KEY" ]; then
-  read -rp "Enter your MusIQ node license key (MSQ-XXXX-XXXX-XXXX): " LICENSE_KEY
+if [ -z "$HOST_LICENSE_ID" ]; then
+  if [ -z "$LICENSE_KEY" ]; then
+    read -rp "Enter your MusIQ node license key (MSQ-XXXX-XXXX-XXXX): " LICENSE_KEY
+  fi
+  LICENSE_KEY=$(echo "$LICENSE_KEY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
+  [ -n "$LICENSE_KEY" ] || error "A license key is required."
 fi
-LICENSE_KEY=$(echo "$LICENSE_KEY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
-[ -n "$LICENSE_KEY" ] || error "A license key is required."
+LABEL="${HOST_LICENSE_ID:-${LICENSE_KEY:0:8}…}"
 
 # ---- node key (Ed25519). A new key is generated on every install (key rotation). --
 info "Generating this node's signing key..."
@@ -69,13 +79,18 @@ chmod 600 "$AGENT_DIR/node.key.new"
 PUBKEY=$(openssl pkey -in "$AGENT_DIR/node.key.new" -pubout -outform DER | tail -c 32 | base64 | tr -d '\n')
 
 # ---- activate ---------------------------------------------------------------------
-info "Activating license ${LICENSE_KEY:0:8}… with $API_BASE"
+info "Activating license $LABEL with $API_BASE"
 AUTH=()
-[ -n "${MUSIQ_HOST_API_KEY:-}" ] && AUTH=(-H "Authorization: Bearer ${MUSIQ_HOST_API_KEY}")
+[ -n "${MUSIQ_HOST_API_KEY:-}" ] && AUTH=(-H "X-ACCESS-KEY: ${MUSIQ_HOST_API_KEY}")
 BYPASS=()
 [ -n "${MUSIQ_BYPASS:-}" ] && BYPASS=(-H "x-vercel-protection-bypass: ${MUSIQ_BYPASS}")
-BODY=$(jq -cn --arg k "$LICENSE_KEY" --arg p "$PUBKEY" --arg v "$AGENT_VERSION" \
-  '{licenseKey:$k, nodePublicKey:$p, agentVersion:$v}')
+if [ -n "$HOST_LICENSE_ID" ]; then
+  BODY=$(jq -cn --arg id "$HOST_LICENSE_ID" --arg p "$PUBKEY" --arg v "$AGENT_VERSION" \
+    '{licenseId:$id, nodePublicKey:$p, agentVersion:$v}')
+else
+  BODY=$(jq -cn --arg k "$LICENSE_KEY" --arg p "$PUBKEY" --arg v "$AGENT_VERSION" \
+    '{licenseKey:$k, nodePublicKey:$p, agentVersion:$v}')
+fi
 RESP=$(curl -sS -w '\n%{http_code}' -X POST "$API_BASE/api/nodes/v1/activate" \
   -H "Content-Type: application/json" "${AUTH[@]}" "${BYPASS[@]}" -d "$BODY") || error "Could not reach $API_BASE"
 CODE=$(echo "$RESP" | tail -1)
@@ -88,8 +103,10 @@ LICENSE_ID=$(echo "$JSON" | jq -r '.licenseId')
 TOKEN_ID=$(echo "$JSON" | jq -r '.tokenId // "pending"')
 
 mv "$AGENT_DIR/node.key.new" "$AGENT_DIR/node.key"
-echo "$LICENSE_KEY" > "$AGENT_DIR/license.key"
-chmod 600 "$AGENT_DIR/license.key"
+if [ -n "$LICENSE_KEY" ]; then
+  echo "$LICENSE_KEY" > "$AGENT_DIR/license.key"
+  chmod 600 "$AGENT_DIR/license.key"
+fi
 cat > "$AGENT_DIR/agent.env" <<EOF
 MUSIQ_API_BASE=$API_BASE
 MUSIQ_LICENSE_ID=$LICENSE_ID
@@ -138,5 +155,5 @@ systemctl enable --now "${SERVICE}.timer" >/dev/null
 info "Sending first heartbeat..."
 systemctl start "${SERVICE}.service" || warn "First heartbeat failed — the timer will retry. Check: journalctl -u ${SERVICE}"
 
-info "Done. License ${LICENSE_KEY:0:8}… (token #${TOKEN_ID}) is active on this machine."
+info "Done. License $LABEL (token #${TOKEN_ID}) is active on this machine."
 info "Status:  systemctl list-timers ${SERVICE}.timer   ·   Logs: journalctl -u ${SERVICE} -n 20"
